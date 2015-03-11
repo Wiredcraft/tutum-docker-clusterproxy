@@ -29,6 +29,18 @@ TUTUM_CONTAINER_API_URL = os.getenv("TUTUM_CONTAINER_API_URL", None)
 POLLING_PERIOD = max(int(os.getenv("POLLING_PERIOD", 30)), 5)
 
 TUTUM_AUTH = os.getenv("TUTUM_AUTH")
+
+# Add support for consul.io 
+CONSUL_API_URL = os.getenv("CONSUL_API_URL", None)
+CONSUL_SERVICES = os.getenv("CONSUL_SERVICES", "web").split(",")
+
+# Add support for stats
+STATS_BIND = os.getenv("STATS_BIND", None)
+STATS_URL = os.getenv("STATS_URL", '/haproxy?stats')
+STATS_USER = os.getenv("STATS_USER", None)
+STATS_PASS = os.getenv("STATS_PASS", None)
+
+
 DEBUG = os.getenv("DEBUG", False)
 
 # Const var
@@ -67,6 +79,18 @@ def create_default_cfg(maxconn, mode):
                    "stats socket /var/run/haproxy.stats level admin"],
         "defaults": ["log global",
                      "mode %s" % mode]})
+
+    if STATS_BIND:
+        stats = [
+                'enable stats',
+                'stats uri %s' % STATS_URL,
+                'stats refresh 5s'
+                ]
+        if STATS_USER and STATS_PASS:
+            stats.append('stats auth %s:%s' % (STATS_USER, STATS_PASS))
+
+        cfg["listen stats %s" % STATS_BIND] = stats
+
     for option in OPTION:
         if option:
             cfg["defaults"].append("option %s" % option.strip())
@@ -250,8 +274,16 @@ if __name__ == "__main__":
             logger.warning(
                 "HAproxy doesn't have access to Tutum API and it's running in Tutum - you might want to give "
                 "an API role to this service for automatic backend reconfiguration")
+    elif CONSUL_API_URL:
+        if CONSUL_SERVICES:
+            logger.info("HAproxy is running with consul.io - will reload list of backends every %d seconds",
+                        POLLING_PERIOD)
+        else:
+            logger.warning(
+                "HAproxy has no defined backend service")
     else:
-        logger.info("HAproxy is not running in Tutum")
+        logger.info("HAproxy is not running in Tutum nor has Consul being defined")
+
     session = requests.Session()
     headers = {"Authorization": TUTUM_AUTH}
 
@@ -270,6 +302,19 @@ if __name__ == "__main__":
                     for port, endpoint in link.get("endpoints", {}).iteritems():
                         if port == "%s/tcp" % BACKEND_PORT:
                             backend_routes[link["name"]] = endpoint_match.match(endpoint).groupdict()
+            elif CONSUL_API_URL and CONSUL_SERVICES:
+                containers = []
+                for service in CONSUL_SERVICES:
+                    r = session.get(CONSUL_API_URL + service.strip(), headers=headers)
+                    r.raise_for_status()
+                    containers.extend(r.json())
+
+                backend_routes = {}
+                for container in containers:
+                    backend_routes[container.get('Node')] = {
+                        'addr': container.get('Address'),
+                        'port': container.get('ServicePort')
+                    }
             else:
                 # No Tutum API access - configuring backends based on static environment variables
                 backend_routes = get_backend_routes(os.environ)
